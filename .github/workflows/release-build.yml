@@ -1,9 +1,8 @@
-name: Build
+name: Build for Multiple OpenWrt Versions (IPK & APK)
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: [ "v*" ]
   workflow_dispatch:
 
 permissions:
@@ -11,7 +10,6 @@ permissions:
 
 jobs:
   build:
-    name: ${{ matrix.version }}-${{ matrix.arch.name }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -26,8 +24,6 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Install Dependencies
         run: |
@@ -73,6 +69,7 @@ jobs:
             tar --zstd -xf "$SDK_FILE"
           fi
 
+          # 从 tar 文件名推 SDK 目录名，避免 find 到多个时选错
           SDK_DIR="${SDK_FILE%.tar.*}"
           if [ ! -d "$SDK_DIR" ]; then
             echo "::error::SDK dir not found after extract: $SDK_DIR"
@@ -80,55 +77,122 @@ jobs:
           fi
           mv "$SDK_DIR" openwrt-sdk
 
-      - name: Inject package sources into SDK
+      - name: Compile Package
         run: |
-          # 把当前仓库整体作为一个本地 feed 挂到 SDK 中
-          mkdir -p openwrt-sdk/package/local
-          rsync -a --exclude='.git' --exclude='.github' --exclude='release_artifacts' \
-            "$GITHUB_WORKSPACE/" openwrt-sdk/package/local/
-
           cd openwrt-sdk
-          # 更新 feeds（拉取 luci-base 等依赖）
+
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Build packages
-        run: |
-          cd openwrt-sdk
-          # 逐个编译，避免一个失败影响另一个
-          make package/local/luci-app-airconnect/compile V=s -j$(nproc) || true
-          make package/local/airconnect/compile V=s -j$(nproc) || true
-
-      - name: Collect built packages
-        run: |
-          mkdir -p release_artifacts
-          find openwrt-sdk/bin/packages/ -type f \( -name '*.ipk' -o -name '*.apk' \) | while read f; do
-            base=$(basename "$f")
-            ext="${base##*.}"
-            name="${base%.*}"
-            if [[ "$ext" == "ipk" ]]; then
-              # ipk 文件名自带架构，直接拷贝
-              cp "$f" "release_artifacts/$base"
-            else
-              # apk 文件名不带架构：luci 包不加，airconnect 加
-              if [[ "$base" == luci-app-airconnect* ]]; then
-                cp "$f" "release_artifacts/$base"
-              else
-                cp "$f" "release_artifacts/${name}_${{ matrix.arch.name }}.${ext}"
-              fi
+          # 直接用 cp -a 拷贝两个包目录到 package/ 下
+          for pkg in luci-app-airconnect airconnect; do
+            if [ ! -d "../$pkg" ]; then
+              echo "::error::源目录不存在：../$pkg"
+              exit 1
             fi
+            rm -rf "package/$pkg"
+            cp -a "../$pkg" "package/"
+            # 清理包目录里的版本控制/CI 残留
+            rm -rf "package/$pkg/.git" "package/$pkg/.github" "package/$pkg/.gitignore"
+            echo "Copied $pkg"
           done
-          echo "===== 收集到的包 ====="
-          ls -la release_artifacts/ || true
 
-      - name: Upload packages
-        uses: ncipollo/release-action@v1
-        continue-on-error: true
+          echo "=== package/luci-app-airconnect 内容 ==="
+          find package/luci-app-airconnect -maxdepth 2 | head -50
+          echo "=== package/airconnect 内容 ==="
+          find package/airconnect -maxdepth 2 | head -50
+
+          # 提前失败，避免 make 报 "No rule to make target"
+          test -f package/luci-app-airconnect/Makefile || {
+            echo "::error::Makefile 不在 package/luci-app-airconnect/Makefile，检查拷贝路径"
+            exit 1
+          }
+          test -f package/airconnect/Makefile || {
+            echo "::error::Makefile 不在 package/airconnect/Makefile，检查拷贝路径"
+            exit 1
+          }
+
+          echo "CONFIG_PACKAGE_luci-app-airconnect=y" >> .config
+          echo "CONFIG_PACKAGE_airconnect=y"          >> .config
+          make defconfig
+
+          # 校验两个包都被选中
+          grep -q '^CONFIG_PACKAGE_luci-app-airconnect=y' .config || {
+            echo "::error::luci-app-airconnect 未被选中，请检查 Makefile 的 DEPENDS"
+            exit 1
+          }
+          grep -q '^CONFIG_PACKAGE_airconnect=y' .config || {
+            echo "::error::airconnect 未被选中，请检查 Makefile 的 DEPENDS"
+            exit 1
+          }
+
+          make package/luci-app-airconnect/compile V=s -j"$(nproc)"
+          make package/airconnect/compile        V=s -j"$(nproc)"
+
+      - name: Organize Artifacts
+        run: |
+          mkdir -p ./deploy
+          ARCH_NAME="${{ matrix.arch.name }}"
+
+          # 用 -print0 兼容文件名中的空格
+          FOUND=0
+          while IFS= read -r -d '' FILE; do
+            FOUND=1
+            FILENAME=$(basename "$FILE")
+
+            if [[ "$FILENAME" == luci-app-airconnect* ]]; then
+              # luci 界面包：架构无关，不加后缀
+              cp "$FILE" ./deploy/
+              echo "Copied LuCI: $FILENAME"
+            elif [[ "$FILENAME" == *.apk ]]; then
+              # airconnect 的 apk 文件名不含架构，加后缀便于区分
+              BASE_NAME="${FILENAME%.apk}"
+              cp "$FILE" "./deploy/${BASE_NAME}_${ARCH_NAME}.apk"
+              echo "Copied & Renamed APK: $FILENAME -> ${BASE_NAME}_${ARCH_NAME}.apk"
+            else
+              # airconnect 的 ipk 文件名自带架构，直接拷贝
+              cp "$FILE" ./deploy/
+              echo "Copied IPK: $FILENAME"
+            fi
+          done < <(find openwrt-sdk/bin/ -type f \
+                     \( -name 'luci-app-airconnect*.ipk' -o -name 'luci-app-airconnect*.apk' \
+                        -o -name 'airconnect*.ipk'       -o -name 'airconnect*.apk' \) -print0)
+
+          if [ "$FOUND" -eq 0 ]; then
+            echo "::error::No airconnect/luci-app-airconnect package files produced!"
+            exit 1
+          fi
+
+          echo "=== 最终产物 ==="
+          ls -la ./deploy/
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.ref_name }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-          allowUpdates: true
-          replacesArtifacts: true
-          prerelease: false
-          artifacts: "release_artifacts/*.ipk,release_artifacts/*.apk"
-          artifactErrorsFailBuild: false
+          name: airconnect-${{ matrix.version }}-${{ matrix.arch.name }}
+          path: ./deploy/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./release-assets
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ./release-assets/*.ipk
+            ./release-assets/*.apk
+          body: |
+            ## AirConnect (LuCI + 二进制) 多架构 / 多版本自动编译
+
+            包含 ipk（OpenWrt 23.05.x）与 apk（OpenWrt 25.12.x）两种格式。
+          generate_release_notes: false
+          fail_on_unmatched_files: false
