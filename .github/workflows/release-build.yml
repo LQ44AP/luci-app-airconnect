@@ -1,4 +1,4 @@
-name: Build
+name: Build airconnect
 
 on:
   push:
@@ -28,14 +28,14 @@ jobs:
             arch: x86_64
 
           # ========== 25.12 架构（完整列表） ==========
-          - sdk: openwrt-25.12
+          - sdk: openwrt-23.05
             arch: aarch64_generic
-          - sdk: openwrt-25.12
+          - sdk: openwrt-23.05
             arch: mips_24kc
-          - sdk: openwrt-25.12
-            arch: mips_mips32
-          - sdk: openwrt-25.12
+          - sdk: openwrt-23.05
             arch: mipsel_24kc
+          - sdk: openwrt-23.05
+            arch: x86_64
 
     steps:
       - uses: actions/checkout@v4
@@ -57,12 +57,17 @@ jobs:
             base=$(basename "$f")
             ext="${base##*.}"
             name="${base%.*}"
-            if [[ "$base" == luci-app-airconnect* ]]; then
-              # luci 界面包：架构无关，不加后缀
+            if [[ "$ext" == "ipk" ]]; then
+              # ipk 文件名自带架构（如 luci-app-airconnect_..._all.ipk、airconnect_..._aarch64_cortex-a53.ipk）
               cp "$f" "release_artifacts/$base"
             else
-              # airconnect 二进制包：加架构后缀
-              cp "$f" "release_artifacts/${name}_${{ matrix.arch }}.${ext}"
+              # apk 文件名不带架构：
+              # luci 界面包架构无关，直接拷贝；airconnect 二进制包加架构后缀
+              if [[ "$base" == luci-app-airconnect* ]]; then
+                cp "$f" "release_artifacts/$base"
+              else
+                cp "$f" "release_artifacts/${name}_${{ matrix.arch }}.${ext}"
+              fi
             fi
           done
           echo "===== 收集到的包 ====="
