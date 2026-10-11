@@ -3,43 +3,39 @@ name: Build
 on:
   push:
     tags:
-      - v*.**
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
-    name: Build ${{ matrix.arch }}-${{ matrix.sdk }}
+    name: Build ${{ matrix.sdk }}-${{ matrix.arch }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        arch:
-          - aarch64_cortex-a53
-          - aarch64_cortex-a72
-          - aarch64_generic
-          - arm_arm1176jzf-s_vfp
-          - arm_arm926ej-s
-          - arm_cortex-a15_neon-vfpv4
-          - arm_cortex-a5_vfpv4
-          - arm_cortex-a7
-          - arm_cortex-a7_neon-vfpv4
-          - arm_cortex-a8_vfpv3
-          - arm_cortex-a9
-          - arm_cortex-a9_neon
-          - arm_cortex-a9_vfpv3-d16
-          - arm_fa526
-          - arm_mpcore
-          - arm_xscale
-          - mips_24kc
-          - mips_4kec
-          - mips_mips32
-          - mipsel_24kc
-          - mipsel_24kc_24kf
-          - mipsel_74kc
-          - mipsel_mips32
-          - x86_64
-        sdk:
-          - openwrt-24.10
-          - SNAPSHOT
+        include:
+          # ========== 23.05 架构（主流，已 EOL） ==========
+          - sdk: openwrt-23.05
+            arch: aarch64_generic
+          - sdk: openwrt-23.05
+            arch: mips_24kc
+          - sdk: openwrt-23.05
+            arch: mipsel_24kc
+          - sdk: openwrt-23.05
+            arch: x86_64
+
+          # ========== 25.12 架构（完整列表） ==========
+          - sdk: openwrt-25.12
+            arch: aarch64_generic
+          - sdk: openwrt-25.12
+            arch: mips_24kc
+          - sdk: openwrt-25.12
+            arch: mips_mips32
+          - sdk: openwrt-25.12
+            arch: mipsel_24kc
 
     steps:
       - uses: actions/checkout@v4
@@ -51,24 +47,35 @@ jobs:
         env:
           ARCH: ${{ matrix.arch }}-${{ matrix.sdk }}
           FEEDNAME: packages_ci
-          PACKAGES: luci-app-airconnect
+          PACKAGES: luci-app-airconnect airconnect
           NO_REFRESH_CHECK: true
 
-      - name: Create compress files
-        continue-on-error: true
+      - name: Collect built packages
         run: |
-          if [ "${{ matrix.arch }}" = "riscv64_riscv64" ] && [ "${{ matrix.sdk }}" = "SNAPSHOT" ]; then
-            tar -zcvf ${{ matrix.sdk }}-${{ matrix.arch }}.tar.gz -C bin/packages/riscv64_generic/ packages_ci
-          else
-            tar -zcvf ${{ matrix.sdk }}-${{ matrix.arch }}.tar.gz -C bin/packages/${{ matrix.arch }}/ packages_ci
-          fi
+          mkdir -p release_artifacts
+          find bin/packages/ -type f \( -name '*.ipk' -o -name '*.apk' \) | while read f; do
+            base=$(basename "$f")
+            ext="${base##*.}"
+            name="${base%.*}"
+            if [[ "$base" == luci-app-airconnect* ]]; then
+              # luci 界面包：架构无关，不加后缀
+              cp "$f" "release_artifacts/$base"
+            else
+              # airconnect 二进制包：加架构后缀
+              cp "$f" "release_artifacts/${name}_${{ matrix.arch }}.${ext}"
+            fi
+          done
+          echo "===== 收集到的包 ====="
+          ls -la release_artifacts/
 
       - name: Upload packages
         uses: ncipollo/release-action@v1
+        continue-on-error: true
         with:
           name: ${{ github.ref_name }}
           token: ${{ secrets.GITHUB_TOKEN }}
           allowUpdates: true
           replacesArtifacts: true
           prerelease: false
-          artifacts: "${{ matrix.sdk }}-${{ matrix.arch }}.tar.gz"
+          artifacts: "release_artifacts/*.ipk,release_artifacts/*.apk"
+          artifactErrorsFailBuild: false
