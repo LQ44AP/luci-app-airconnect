@@ -16,8 +16,8 @@ jobs:
       matrix:
         version: [23.05.6, 25.12.5]
         arch:
-          - { name: mipsel_24kc,     target: ramips,   subtarget: mt7621 }
-          - { name: mips_24kc,       target: ath79,    subtarget: generic }
+          # - { name: mipsel_24kc,     target: ramips,   subtarget: mt7621 }
+          # - { name: mips_24kc,       target: ath79,    subtarget: generic }
           - { name: x86_64,          target: x86,      subtarget: 64 }
           - { name: aarch64_generic, target: rockchip, subtarget: armv8 }
 
