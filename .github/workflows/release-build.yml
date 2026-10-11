@@ -1,4 +1,4 @@
-name: Build airconnect
+name: Build
 
 on:
   push:
@@ -11,67 +11,115 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.sdk }}-${{ matrix.arch }}
+    name: ${{ matrix.version }}-${{ matrix.arch.name }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # ========== 23.05.6 架构（主流，已 EOL） ==========
-          - sdk: openwrt-23.05
-            arch: aarch64_generic
-          - sdk: openwrt-23.05
-            arch: mips_24kc
-          - sdk: openwrt-23.05
-            arch: mipsel_24kc
-          - sdk: openwrt-23.05
-            arch: x86_64
-
-          # ========== 25.12.5 架构（完整列表） ==========
-          - sdk: openwrt-25.12
-            arch: aarch64_generic
-          - sdk: openwrt-25.12
-            arch: mips_24kc
-          - sdk: openwrt-25.12
-            arch: mipsel_24kc
-          - sdk: openwrt-25.12
-            arch: x86_64
+        version: [23.05.6, 25.12.5]
+        arch:
+          - { name: mipsel_24kc,     target: ramips,   subtarget: mt7621 }
+          - { name: mips_24kc,       target: ath79,    subtarget: generic }
+          - { name: x86_64,          target: x86,      subtarget: 64 }
+          - { name: aarch64_generic, target: rockchip, subtarget: armv8 }
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Building packages
-        uses: sbwml/openwrt-gh-action-sdk@main
-        env:
-          ARCH: ${{ matrix.arch }}-${{ matrix.sdk }}
-          FEEDNAME: packages_ci
-          PACKAGES: luci-app-airconnect airconnect
-          NO_REFRESH_CHECK: true
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses5-dev gawk git gettext \
+            libssl-dev xsltproc wget unzip python3 file zstd tar rsync
+
+      - name: Set version-specific variables
+        id: vars
+        run: |
+          VERSION="${{ matrix.version }}"
+          if [[ "$VERSION" =~ ^25\. ]] || [[ "$VERSION" =~ ^main ]]; then
+            echo "suffix=apk" >> "$GITHUB_OUTPUT"
+            echo "ext=zst"   >> "$GITHUB_OUTPUT"
+            echo "sdk_pattern=openwrt-sdk-*.tar.zst" >> "$GITHUB_OUTPUT"
+          else
+            echo "suffix=ipk" >> "$GITHUB_OUTPUT"
+            echo "ext=xz"   >> "$GITHUB_OUTPUT"
+            echo "sdk_pattern=openwrt-sdk-*.tar.xz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download and Setup SDK
+        run: |
+          VERSION="${{ matrix.version }}"
+          TARGET="${{ matrix.arch.target }}"
+          SUBTARGET="${{ matrix.arch.subtarget }}"
+          SDK_BASE="https://downloads.openwrt.org/releases/${VERSION}/targets/${TARGET}/${SUBTARGET}/"
+          PATTERN="${{ steps.vars.outputs.sdk_pattern }}"
+          EXT="${{ steps.vars.outputs.ext }}"
+
+          wget -nv -r -l1 -nd -A "$PATTERN" -e robots=off "$SDK_BASE"
+          SDK_FILE=$(ls $PATTERN 2>/dev/null | head -n 1)
+
+          if [ -z "$SDK_FILE" ]; then
+            echo "::error::No SDK file found at $SDK_BASE"
+            exit 1
+          fi
+          echo "Found SDK: $SDK_FILE"
+
+          if [ "$EXT" = "xz" ]; then
+            tar -xJf "$SDK_FILE"
+          else
+            tar --zstd -xf "$SDK_FILE"
+          fi
+
+          SDK_DIR="${SDK_FILE%.tar.*}"
+          if [ ! -d "$SDK_DIR" ]; then
+            echo "::error::SDK dir not found after extract: $SDK_DIR"
+            exit 1
+          fi
+          mv "$SDK_DIR" openwrt-sdk
+
+      - name: Inject package sources into SDK
+        run: |
+          # 把当前仓库整体作为一个本地 feed 挂到 SDK 中
+          mkdir -p openwrt-sdk/package/local
+          rsync -a --exclude='.git' --exclude='.github' --exclude='release_artifacts' \
+            "$GITHUB_WORKSPACE/" openwrt-sdk/package/local/
+
+          cd openwrt-sdk
+          # 更新 feeds（拉取 luci-base 等依赖）
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Build packages
+        run: |
+          cd openwrt-sdk
+          # 逐个编译，避免一个失败影响另一个
+          make package/local/luci-app-airconnect/compile V=s -j$(nproc) || true
+          make package/local/airconnect/compile V=s -j$(nproc) || true
 
       - name: Collect built packages
         run: |
           mkdir -p release_artifacts
-          find bin/packages/ -type f \( -name '*.ipk' -o -name '*.apk' \) | while read f; do
+          find openwrt-sdk/bin/packages/ -type f \( -name '*.ipk' -o -name '*.apk' \) | while read f; do
             base=$(basename "$f")
             ext="${base##*.}"
             name="${base%.*}"
             if [[ "$ext" == "ipk" ]]; then
-              # ipk 文件名自带架构（如 luci-app-airconnect_..._all.ipk、airconnect_..._aarch64_cortex-a53.ipk）
+              # ipk 文件名自带架构，直接拷贝
               cp "$f" "release_artifacts/$base"
             else
-              # apk 文件名不带架构：
-              # luci 界面包架构无关，直接拷贝；airconnect 二进制包加架构后缀
+              # apk 文件名不带架构：luci 包不加，airconnect 加
               if [[ "$base" == luci-app-airconnect* ]]; then
                 cp "$f" "release_artifacts/$base"
               else
-                cp "$f" "release_artifacts/${name}_${{ matrix.arch }}.${ext}"
+                cp "$f" "release_artifacts/${name}_${{ matrix.arch.name }}.${ext}"
               fi
             fi
           done
           echo "===== 收集到的包 ====="
-          ls -la release_artifacts/
+          ls -la release_artifacts/ || true
 
       - name: Upload packages
         uses: ncipollo/release-action@v1
