@@ -18,23 +18,23 @@ jobs:
       matrix:
         include:
           # ========== 23.05.6 架构（主流，已 EOL） ==========
-          - sdk: openwrt-23.05.6
+          - sdk: openwrt-23.05
             arch: aarch64_generic
-          - sdk: openwrt-23.05.6
+          - sdk: openwrt-23.05
             arch: mips_24kc
-          - sdk: openwrt-23.05.6
+          - sdk: openwrt-23.05
             arch: mipsel_24kc
-          - sdk: openwrt-23.05.6
+          - sdk: openwrt-23.05
             arch: x86_64
 
           # ========== 25.12.5 架构（完整列表） ==========
-          - sdk: openwrt-25.12.5
+          - sdk: openwrt-25.12
             arch: aarch64_generic
-          - sdk: openwrt-25.12.5
+          - sdk: openwrt-25.12
             arch: mips_24kc
-          - sdk: openwrt-25.12.5
+          - sdk: openwrt-25.12
             arch: mipsel_24kc
-          - sdk: openwrt-25.12.5
+          - sdk: openwrt-25.12
             arch: x86_64
 
     steps:
